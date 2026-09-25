@@ -1,13 +1,20 @@
-# Datasets — never commit
+# Datasets
 dataset/
 data/
+experiments/
+output/*.tsv
 
 # Python
+venv/
+.venv/
 __pycache__/
 *.pyc
-.venv/
-venv/
+*.pkl
+*.joblib
 .env
+
+# Notebooks
+.ipynb_checkpoints/
 
 # Editors / OS
 .vscode/
