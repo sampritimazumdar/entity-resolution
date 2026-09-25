@@ -1,0 +1,16 @@
+# Datasets — never commit
+dataset/
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
