@@ -8,9 +8,12 @@ from collections import defaultdict
 from rapidfuzz import fuzz
 from sklearn.ensemble import GradientBoostingClassifier
 
+import sys
+sys.path.insert(0, 'code/business_entity_resolution')
+from src.features import featurize_pair
 CHUNK = 500_000
-SAMPLE_N = 200000
-TOP_K = 30
+SAMPLE_N = 8000
+TOP_K = 15
 
 def norm(s):
     if not isinstance(s, str):
@@ -57,6 +60,8 @@ print(f"  index: {len(index)} keys, {len(pool)} rows ({time.time()-t0:.1f}s)")
 print("[3/5] Building feature matrix...")
 gt_map = dict(zip(gt['source1_entity_id'], gt['matched_entity_ids'].fillna('')))
 rows = []
+cand_sizes = []
+cand_pairs_rows = []
 for i, r in s1.iterrows():
     if i % 20000 == 0:
         print(f"    {i}/{len(s1)} ({time.time()-t0:.1f}s)")
@@ -73,21 +78,32 @@ for i, r in s1.iterrows():
         c = pool_lookup.loc[cid]
         ns = fuzz.token_set_ratio(nname, c['nname']) / 100
         scored.append((cid, ns))
-    scored.sort(key=lambda x: -x[1])
-    for cid, _ in scored[:TOP_K]:
+        scored.sort(key=lambda x: -x[1])
+    top = scored[:TOP_K]
+    cand_sizes.append(len(top))
+    for rank, (cid, ns) in enumerate(top):
+        if rank < 10:
+            cand_pairs_rows.append({'s1_entity_id': sid, 'candidate_id': cid, 'score': round(ns, 4), 'rank': rank+1})
+    for cid, _ in top:
         c = pool_lookup.loc[cid]
-        feat = featurize(nname, naddr, c['nname'], c['naddr'],
-                         r['country'] == c['country'])
+        feat = featurize_pair(r, c)
         feat['label'] = int(cid in gold)
         feat['s1'] = sid
         feat['cid'] = cid
         rows.append(feat)
 print(f"  {len(rows)} pairs ({time.time()-t0:.1f}s)")
+avg_cand = float(np.mean(cand_sizes)) if cand_sizes else 0.0
+print(f"  avg candidates per S1: {avg_cand:.2f}")
+pd.DataFrame(cand_pairs_rows).to_csv('code/business_entity_resolution/candidate_pairs.tsv', sep='\t', index=False)
+print(f"  saved candidate_pairs.tsv ({len(cand_pairs_rows)} rows)")
+
 
 print("[4/5] Training classifier...")
+feat_cols = ['name_ratio','name_token_set','name_partial','name_jaccard',
+'addr_ratio','addr_token_set','addr_partial','addr_jaccard',
+'same_country','first_token_match','name_length_ratio',
+'address_length_ratio','same_zip','numeric_token_match','name_phonetic']
 df = pd.DataFrame(rows)
-feat_cols = ['name_token_set','name_ratio','name_partial',
-             'addr_token_set','addr_ratio','addr_partial','same_country']
 X = df[feat_cols].values
 y = df['label'].values
 print(f"  positives: {y.sum()}, negatives: {len(y)-y.sum()}")
