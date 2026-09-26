@@ -1,50 +1,33 @@
-"""Report candidate-pair stats for output/candidate_pairs.tsv."""
-import argparse
-import numpy as np
 import pandas as pd
+import numpy as np
 
-CAND_COL = 'candidate_ids'
+df = pd.read_csv('output/candidate_pairs.tsv', sep='\t', dtype=str, keep_default_na=False)
 
+# Auto-detect the candidate column
+cand_col = None
+for c in ['candidate_entity_ids', 'candidate_ids', 'candidates', 'source2_entity_ids']:
+    if c in df.columns:
+        cand_col = c
+        break
+if cand_col is None:
+    raise SystemExit(f"No candidate column found. Columns: {list(df.columns)}")
 
-def parse_ids(s):
-    if not isinstance(s, str) or not s.strip():
-        return set()
-    return {x.strip() for x in s.split(',') if x.strip()}
+df['n'] = df[cand_col].apply(
+    lambda x: 0 if x.strip() == '' else len(x.split(',')))
 
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--path', default='output/candidate_pairs.tsv')
-    ap.add_argument('--col',  default=CAND_COL)
-    args = ap.parse_args()
-
-    df = pd.read_csv(args.path, sep='\t')
-    if args.col not in df.columns:
-        raise SystemExit(
-            f"Column '{args.col}' not found. Columns are: {list(df.columns)}"
-        )
-
-    counts = df[args.col].apply(lambda s: len(parse_ids(s)))
-    n = len(counts)
-
-    print(f'=== {args.path} ===')
-    print(f'Total S1: {n}')
-    print()
-    print(f'Avg candidates/S1 : {counts.mean():.2f}')
-    print(f'p50               : {np.percentile(counts, 50):.0f}')
-    print(f'p90               : {np.percentile(counts, 90):.0f}')
-    print(f'max               : {counts.max()}')
-    print()
-
-    bins   = [-1, 0, 10, 20, 30, 10**9]
-    labels = ['0', '1-10', '11-20', '21-30', '30+']
-    buckets = pd.cut(counts, bins=bins, labels=labels)
-    print('Distribution:')
-    for lab in labels:
-        c = int((buckets == lab).sum())
-        pct = 100 * c / n if n else 0
-        print(f'  {lab:>6s} : {c:>7d}  ({pct:5.1f}%)')
-
-
-if __name__ == '__main__':
-    main()
+print(f'Column used: {cand_col}')
+print('Total S1:', len(df))
+print('Empty (0 candidates):', (df['n'] == 0).sum())
+print()
+print('Candidate count per S1:')
+print('  mean:  ', round(df['n'].mean(), 2))
+print('  median:', int(df['n'].median()))
+print('  p90:   ', int(np.percentile(df['n'], 90)))
+print('  p99:   ', int(np.percentile(df['n'], 99)))
+print('  max:   ', int(df['n'].max()))
+print()
+bins = [0, 1, 10, 20, 30, 100000]
+labels = ['0', '1-10', '11-20', '21-30', '30+']
+print('Distribution:')
+for lbl, cnt in zip(labels, np.histogram(df['n'], bins=bins)[0]):
+    print(f'  {lbl:>8}: {cnt}')
