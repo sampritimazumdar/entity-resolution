@@ -37,6 +37,7 @@ def featurize_pair(s1_row, cand_row):
         'same_country':   int(s1_row['country'] == cand_row['country']),
         'first_token_match': int(first_token(na) == first_token(nb)),
         'name_length_ratio': max(0.5, min(2.0, len(na) / len(nb))) if nb else 0.5,
+        'address_length_ratio': max(0.5, min(2.0, len(aa) / len(ab))) if ab else 0.5,
     }
 
     # pincode
