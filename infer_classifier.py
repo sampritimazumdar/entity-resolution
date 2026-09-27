@@ -5,18 +5,23 @@ import os
 import time
 import gc
 import joblib
+import jellyfish
 from unidecode import unidecode
 from collections import defaultdict
 from rapidfuzz import fuzz
+
+import sys, os
+sys.path.insert(0, 'code/business_entity_resolution')
+from src.features import featurize_pair
 
 TOP_K = 30
 CHUNK = 500_000
 
 bundle = joblib.load('code/business_entity_resolution/model.joblib')
 MODEL = bundle['model']
-THRESHOLD = bundle['threshold']
+THRESHOLD = 0.65
 FEATURES = bundle['features']
-print(f"Loaded model. Threshold={THRESHOLD}")
+print(f"Loaded model. Threshold={THRESHOLD}. Features={len(FEATURES)}")
 
 def norm(s):
     if not isinstance(s, str):
@@ -29,20 +34,53 @@ def make_key(name, country):
     tokens = norm(name).split()[:2]
     return str(country) + '|' + ' '.join(tokens)
 
+def jaccard(a, b):
+    sa, sb = set(a.split()), set(b.split())
+    return len(sa & sb) / len(sa | sb) if (sa | sb) else 0.0
+
+def first_tok(s):
+    parts = s.split()
+    return parts[0] if parts else ''
+
+def length_ratio(a, b):
+    if not a or not b:
+        return 0.0
+    return min(len(a), len(b)) / max(len(a), len(b))
+
 def featurize(n1, a1, n2, a2, same_country):
+    try:
+        return _featurize_inner(n1, a1, n2, a2, same_country)
+    except Exception:
+        return {k: 0.0 for k in FEATURES}
+
+def _featurize_inner(n1, a1, n2, a2, same_country):
+    za = set(re.findall(r'\b\d{5,6}\b', a1))
+    zb = set(re.findall(r'\b\d{5,6}\b', a2))
+    same_zip = int(bool(za & zb)) if (za or zb) else 0
+    nums_a = set(re.findall(r'\d+', a1))
+    nums_b = set(re.findall(r'\d+', a2))
+    numeric_token_match = int(bool(nums_a & nums_b)) if (nums_a or nums_b) else 0
+    ft1, ft2 = first_tok(n1), first_tok(n2)
     return {
-        'name_token_set': fuzz.token_set_ratio(n1, n2) / 100,
-        'name_ratio':     fuzz.ratio(n1, n2) / 100,
-        'name_partial':   fuzz.partial_ratio(n1, n2) / 100,
-        'addr_token_set': fuzz.token_set_ratio(a1, a2) / 100,
-        'addr_ratio':     fuzz.ratio(a1, a2) / 100,
-        'addr_partial':   fuzz.partial_ratio(a1, a2) / 100,
-        'same_country':   int(same_country),
+        'name_ratio':           fuzz.ratio(n1, n2) / 100,
+        'name_token_set':       fuzz.token_set_ratio(n1, n2) / 100,
+        'name_partial':         fuzz.partial_ratio(n1, n2) / 100,
+        'name_jaccard':         jaccard(n1, n2),
+        'addr_ratio':           fuzz.ratio(a1, a2) / 100,
+        'addr_token_set':       fuzz.token_set_ratio(a1, a2) / 100,
+        'addr_partial':         fuzz.partial_ratio(a1, a2) / 100,
+        'addr_jaccard':         jaccard(a1, a2),
+        'same_country':         int(same_country),
+        'first_token_match':    int(ft1 == ft2 and ft1 != ''),
+        'name_length_ratio':    length_ratio(n1, n2),
+        'address_length_ratio': length_ratio(a1, a2),
+        'same_zip':             same_zip,
+        'numeric_token_match':  numeric_token_match,
+        'name_phonetic':        int(jellyfish.metaphone(ft1) == jellyfish.metaphone(ft2) and ft1 != ''),
     }
 
 def stream_tsv(path, usecols=None):
-    for chunk in pd.read_csv(path, sep='\t', chunksize=CHUNK,
-                             usecols=usecols, dtype=str):
+    for chunk in pd.read_csv(path, sep='\t', chunksize=CHUNK, usecols=usecols, dtype=str):
         yield chunk
 
 t0 = time.time()
@@ -50,9 +88,7 @@ os.makedirs('output', exist_ok=True)
 
 print("[1/3] Building blocking index from S2 + S3 (chunked) ...")
 index = defaultdict(list)
-pool_nname = {}
-pool_naddr = {}
-pool_country = {}
+pool = {}   # id -> (nname, naddr, bname, baddr, country)
 for src in ['dataset/test/test_source2.tsv', 'dataset/test/test_source3.tsv']:
     print(f"    reading {src}")
     for chunk in stream_tsv(src, usecols=['entity_id','business_name','business_address','country']):
@@ -60,12 +96,10 @@ for src in ['dataset/test/test_source2.tsv', 'dataset/test/test_source3.tsv']:
                                     chunk['business_address'], chunk['country']):
             k = make_key(bn, co)
             index[k].append(eid)
-            pool_nname[eid] = norm(bn)
-            pool_naddr[eid] = norm(ba)
-            pool_country[eid] = co
+            pool[eid] = (norm(bn), norm(ba), bn, ba, co)
         del chunk
         gc.collect()
-print(f"    index: {len(index)} keys, {len(pool_nname)} records ({time.time()-t0:.1f}s)")
+print(f"    index: {len(index)} keys, {len(pool)} records ({time.time()-t0:.1f}s)")
 
 print("[2/3] Scoring S1 in chunks ...")
 out_m = open('output/matching_results.tsv', 'w', encoding='utf-8')
@@ -94,9 +128,8 @@ for chunk in stream_tsv('dataset/test/test_source1.tsv',
             continue
 
         scored = []
-        cands = cands[:200]
-        for cid in cands:
-            ns = fuzz.token_set_ratio(nname, pool_nname.get(cid, '')) / 100
+        for cid in cands[:50]:
+            ns = fuzz.token_set_ratio(nname, pool.get(cid, ('','','','',''))[0]) / 100
             scored.append((cid, ns))
         scored.sort(key=lambda x: -x[1])
         top = scored[:TOP_K]
@@ -109,11 +142,21 @@ for chunk in stream_tsv('dataset/test/test_source1.tsv',
 
         rows = []
         for cid in top_ids:
-            rows.append(featurize(nname, naddr,
-                                   pool_nname.get(cid, ''),
-                                   pool_naddr.get(cid, ''),
-                                   co == pool_country.get(cid, '')))
-        X = pd.DataFrame(rows)[FEATURES]
+            s1_series = pd.Series({'business_name': bn, 'business_address': ba, 'country': co})
+            c_series  = pd.Series({'business_name': pool.get(cid, ('','','','',''))[2],
+                                   'business_address': pool.get(cid, ('','','','',''))[3],
+                                   'country': pool.get(cid, ('','','','',''))[4]})
+            rows.append(featurize_pair(s1_series, c_series))
+        if not rows:
+            out_m.write(f"{sid}\t\n")
+            out_c.write(f"{sid}\t\n")
+            continue
+        try:
+            X = pd.DataFrame(rows)[FEATURES].astype(float).fillna(0.0)
+        except Exception:
+            out_m.write(f"{sid}\t\n")
+            out_c.write(f"{sid}\t\n")
+            continue
         probs = MODEL.predict_proba(X)[:, 1]
         kept = [cid for cid, p in zip(top_ids, probs) if p >= THRESHOLD]
 
